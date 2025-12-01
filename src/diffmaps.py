@@ -169,3 +169,90 @@ def create_overlay(
     # Blend overlay with original
     blended = cv2.addWeighted(overlay, alpha, base_bgr, 1 - alpha, 0)
     return blended
+
+def compute_edge_line_mask(
+    base: np.ndarray,
+    aligned: np.ndarray,
+    blur_ksize: int = 3,
+    low_threshold: int = 60,
+    high_threshold: int = 180,
+    min_component_area: int = 40,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    More precise *line-based* difference.
+
+    Steps:
+    - light blur to reduce paper noise
+    - Canny edges on both images
+    - XOR of the two edge maps (lines present in one but not the other)
+    - remove tiny connected components
+
+    Returns
+    -------
+    edge_diff : np.ndarray
+        Edge difference image for display (uint8).
+    mask : np.ndarray
+        Cleaned binary mask (0 or 255) of changed line segments.
+    """
+    if base.shape != aligned.shape:
+        raise ValueError("Base and aligned images must have the same shape.")
+
+    # Light blur to kill micro-paper texture but keep lines sharp
+    base_blur = cv2.GaussianBlur(base, (blur_ksize, blur_ksize), 0)
+    aligned_blur = cv2.GaussianBlur(aligned, (blur_ksize, blur_ksize), 0)
+
+    # Canny edges (binary, 0 or 255)
+    edges1 = cv2.Canny(base_blur, low_threshold, high_threshold)
+    edges2 = cv2.Canny(aligned_blur, low_threshold, high_threshold)
+
+    # XOR: pixels where only one image has an edge → changed lines
+    edge_diff = cv2.bitwise_xor(edges1, edges2)
+
+    # Optionally thicken very thin edges a bit
+    kernel = np.ones((3, 3), np.uint8)
+    thick = cv2.dilate(edge_diff, kernel, iterations=1)
+
+    # Remove tiny specks via connected components
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        thick, connectivity=8
+    )
+    clean_mask = np.zeros_like(thick)
+    for label in range(1, num_labels):  # skip background
+        area = stats[label, cv2.CC_STAT_AREA]
+        if area >= min_component_area:
+            clean_mask[labels == label] = 255
+
+    # For the left panel we can just show the cleaned XOR edges.
+    return clean_mask.astype("uint8"), clean_mask.astype("uint8")
+
+
+def color_overlay_two(
+    base: np.ndarray,
+    aligned: np.ndarray,
+) -> np.ndarray:
+    """
+    Create a color overlay where:
+
+    - base impression is tinted RED
+    - aligned impression is tinted CYAN (G+B)
+
+    Lines present in both appear dark/black,
+    lines unique to one impression are colored.
+
+    Returns a BGR image (for OpenCV/Streamlit).
+    """
+    # Normalize both to full 0–255 range
+    base_norm = cv2.normalize(base, None, 0, 255, cv2.NORM_MINMAX).astype("uint8")
+    aligned_norm = cv2.normalize(aligned, None, 0, 255, cv2.NORM_MINMAX).astype("uint8")
+
+    # Invert so dark ink = high values (easier to see as bright color)
+    base_inv = 255 - base_norm
+    aligned_inv = 255 - aligned_norm
+
+    # base -> red channel, aligned -> green+blue (cyan)
+    r = base_inv
+    g = aligned_inv
+    b = aligned_inv
+
+    overlay_bgr = cv2.merge([b, g, r])
+    return overlay_bgr
