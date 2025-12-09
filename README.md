@@ -1,122 +1,117 @@
 Intaglio State Comparator
 A Computer Vision Tool for Comparative Analysis of Intaglio Print Impressions
-
 Overview
-The Intaglio State Comparator is a computer-vision research tool designed to support connoisseurship and technical art history.
-Given two digitized impressions of the same intaglio plate (etching, engraving, drypoint, mezzotint, etc.), the app:
+The Intaglio State Comparator is a computer-vision research tool designed for connoisseurship, technical art history, and print-room analysis.
+Given two digitized impressions of the same intaglio plate (etching, engraving, drypoint, mezzotint, etc.), the tool:
 Standardizes both images
-
 Aligns the second impression to the first
-
 Computes pixel-level difference maps
-
-Generates interpretive overlays highlighting where lines, tone, or plate condition differ
-
-Allows interactive exploration via toggles, thresholding, inversion, and visibility controls
-
-The app is optimized for:
-comparing different states of a plate
-studying plate wear, rework, foul biting, drypoint burr
-identifying strengthened or effaced lines
-examining differences between impressions from different museums
-supporting cataloging and catalogues raisonnés
-It does not assign states automatically — it surfaces areas worth close looking.
-🏗️ Technology Stack
-This tool is written in Python and built on standard, high-performance, open-source libraries used in scientific imaging.
+Generates interpretive overlays highlighting differences in linework, tone, and plate condition
+Supports interactive exploration (thresholds, inversion, visibility toggles)
+The tool is optimized for:
+Comparing different states of a plate
+Studying plate wear, rework, foul biting, drypoint burr
+Identifying strengthened or effaced lines
+Examining differences between impressions from different museums
+Supporting cataloging, catalogues raisonnés, and curatorial decision-making
+It does not assign states automatically — instead, it surfaces areas that warrant close looking.
+Technology Stack
+This tool is written in Python and built on high-performance open-source libraries used in scientific imaging.
 Core Libraries
 1. OpenCV (cv2)
-Used for all heavy-lifting in imaging and computer vision:
-image decoding (JPEG/PNG/TIFF → arrays)
-grayscale conversion
-resizing & normalization
-feature detection and matching
-homography estimation
-warping and alignment
-edge extraction
-difference-map generation
-masking & overlay creation
-color space conversions (BGR/RGB/HSV)
-OpenCV gives the tool fast, reliable, vectorized operations that scale to large museum-quality scans.
+Handles all major computer-vision operations:
+Image decoding (JPEG/PNG/TIFF → arrays)
+Grayscale conversion
+Resizing & normalization
+Feature detection and matching (AKAZE/SIFT)
+Homography estimation (RANSAC)
+Image warping & alignment
+Edge extraction (Canny)
+Difference-map generation
+Masking & overlay creation
+Color conversions (BGR/RGB/HSV)
+OpenCV enables fast, vectorized operations suitable for large museum-quality scans.
 2. NumPy
-Used for pixel-level mathematical operations:
-channel stacking
-tinting red/cyan overlays
-normalization
-mask operations
-thresholding
-arithmetic on aligned images
-NumPy provides efficient array-based computation essential for real-time comparison.
+Provides efficient array-based computation for:
+Pixel arithmetic
+Overlay tinting (red/cyan)
+Mask and threshold operations
+Normalization
+Channel stacking
+Essential for real-time comparative analysis.
 3. Streamlit (UI Layer)
-Provides the interactive web interface:
-file uploads
-sliders, radio buttons, toggles
-image display with auto-resize
-responsive layout
-session state for swapping and display toggles
-Streamlit allows rapid experimentation and deployment without requiring JavaScript.
-4. Custom Modules
-Located in src/:
+Powers the web interface:
+File uploads
+Sliders, buttons, toggles
+Responsive image display
+Session-state handling
+Rapid experiment-driven development
+No JavaScript required.
+4. Custom Modules (src/)
 preprocess.py — cropping, resizing, denoising, contrast normalization
-align.py — feature-based alignment using OpenCV (AKAZE/SIFT) + RANSAC homography
-diffmaps.py — tonal difference, edge-aware difference, binary masks, overlays
-utils.py — BGR/RGB conversions and misc helpers
-These pieces are modular, testable, and easy to extend.
-🔬 Image Processing Pipeline — Detailed Explanation
+align.py — feature-based alignment using AKAZE/SIFT + RANSAC
+diffmaps.py — tonal differences, edge maps, binary masks, overlays
+utils.py — color conversions + helper functions
+All components are modular and extendable.
+🔬 Image Processing Pipeline
 Below is the exact pipeline applied to every pair of impressions.
 1. Preprocessing
-Preprocessing ensures both impressions are standardized before comparison:
+Purpose: standardize impressions to maximize comparability.
+Steps:
 Convert to grayscale
-Resize based on user-selected max width
-Normalize contrast (CLAHE or linear scaling)
+Resize based on user-selected max dimension
+Normalize contrast (CLAHE or linear)
 Light denoising to reduce scanner noise
-Optional cropping in your codebase (if implemented)
-Goal: maximize comparability while minimizing noise.
+Optional cropping (if enabled)
 2. Image Alignment
-Alignment is critical. Two impressions of the same plate rarely match pixel-by-pixel:
-slight rotation
-scanner skew
-stretch from paper expansion
-uneven cropping
-photographing vs scanning differences
-Alignment Steps:
-Detect local features (AKAZE or SIFT)
-Match features across images
-Filter matches via Lowe ratio test
-Fit a homography using RANSAC
-Warp the target image onto the base
-If successful, impressions are aligned with subpixel precision.
+Intaglio impressions rarely match pixel-to-pixel due to:
+Slight rotation
+Scanner skew
+Paper expansion/warp
+Uneven cropping
+Photographing vs scanning differences
+Alignment workflow:
+Detect features (AKAZE or SIFT)
+Match features
+Filter matches using Lowe ratio test
+Estimate homography via RANSAC
+Warp target impression to align with the base
+Achieves subpixel precision when successful.
 3. Tonal Difference Map
-Compute tonal differences:
+Used to detect:
+Plate wear (loss of tone)
+Rebitten or strengthened lines
+Ink distribution differences
+State-level changes
+Operations:
 diff_raw = abs(base - target_aligned)
-norm_diff = normalize(diff_raw)
+norm = normalize(diff_raw)
 mask = threshold(diff_raw)
-Use cases:
-plate wear (lighter tones)
-rebitten lines (darker)
-ink distribution differences
-A slider allows fine control of mask sensitivity.
-4. Experimental Line-Difference Map
-Extract edges:
-edges_base = Canny(base)
-edges_target = Canny(aligned_target)
-line_diff = XOR(edges_base, edges_target)
-This isolates changed linework.
-5. Color Overlay (Red vs Cyan) with Proper Tinting
-The most connoisseur-friendly visualization:
+User-adjustable slider controls threshold sensitivity.
+4. Line-Difference Map (Experimental)
+Extract edges → compare linework:
+edges_base   = Canny(base)
+edges_target = Canny(target_aligned)
+line_diff    = XOR(edges_base, edges_target)
+Useful for pinpointing added or effaced burin/needle work.
+5. Red–Cyan Color Overlay
+A connoisseur-friendly composite:
 Base impression → red-tinted grayscale
 Target impression → cyan-tinted grayscale
-Areas where both align become neutral
-Differences glow red or cyan
-Hide/toggle each layer independently
-Optional inversion gives a photographic negative effect
-This style mirrors digital compositing techniques used in leading print rooms.
+Regions of alignment → neutral
+Differences → glow red or cyan
+Supports:
+Hide/show each impression
+Thresholded mask view
+Inversion (photographic negative)
+Mirrors digital compositing workflows used in major print rooms.
 🧪 Advanced Features
-Swap base & target: flips comparison direction
-Black/white inversion: inverts luminance but preserves color channels
-Hide Base / Hide Target: isolate impressions
-Threshold slider: manually tune the difference mask
-Display original scans and preprocessed scans
-Everything updates dynamically.
+Swap base/target
+Threshold slider for mask refinement
+Inversion (black ↔ white)
+Hide Base / Hide Target for isolating impressions
+Original vs preprocessed comparisons
+All visualizations update live.
 🚀 How to Run Locally
 1. Clone the repo
 git clone https://github.com/yourusername/intaglio-comparator.git
@@ -126,65 +121,30 @@ python3 -m venv venv
 source venv/bin/activate
 3. Install dependencies
 pip install -r requirements.txt
-4. Run the app
+4. Launch the app
 streamlit run app/app.py
-Visit:
+Then open:
 👉 http://localhost:8501
-
-# AI-Assisted State Detection for Intaglio Prints
-
-This repository contains a prototype tool for aligning multiple impressions of the same intaglio print, 
-computing visual difference maps, and (optionally) clustering impressions into probable plate states.
-
-## Features
-
-- Image preprocessing (grayscale, contrast normalization, resizing)
-- Feature-based image alignment using ORB and homography estimation
-- Edge-based difference maps and binary change masks
-- Red-overlay visualizations that highlight regions of change
-- Simple grid-based feature extraction per impression
-- KMeans clustering for grouping impressions into probable states
-- Minimal Streamlit app for upload, alignment, and visualization
-
-## Quickstart
-
-1. **Create a virtual environment** (recommended) and activate it.
-
-2. **Install dependencies**:
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Run the Streamlit app**:
-
-   ```bash
-   streamlit run app/app.py
-   ```
-
-4. Upload two digitized impressions of the same intaglio print and inspect the highlighted differences.
-
-## Layout
-
-```text
-ai_state_detector_full/
+Repository Layout
+intaglio-state-comparator/
   README.md
   requirements.txt
+  
   data/
-    raw/         # put your original test images here
-    processed/   # optional: for saving preprocessed/aligned images
+    raw/         # original test images
+    processed/   # optional: preprocessed or aligned outputs
+
   src/
-    __init__.py
     preprocess.py
     align.py
     diffmaps.py
-    features.py
-    cluster.py
     utils.py
-  notebooks/     # for experiments / analysis
-  app/
-    app.py       # Streamlit interface
-```
+    features.py
+    cluster.py    # optional: experimental clustering for state prediction
 
-This is a research prototype, not production software. Many parameters (thresholds, grid sizes, etc.)
-are intentionally exposed and can be tuned for different kinds of prints and digitization conditions.
+  notebooks/
+    experiments.ipynb
+
+  app/
+    app.py        # Streamlit interface
+This is a research prototype, not production software. Parameters (thresholds, grid sizes, feature detectors) are intentionally exposed for tuning across print types, papers, and digitization conditions.
