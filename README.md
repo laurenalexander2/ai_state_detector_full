@@ -1,13 +1,20 @@
-📘 README.md — Intaglio State Comparator
+Intaglio State Comparator
 A Computer Vision Tool for Comparative Analysis of Intaglio Print Impressions
-📖 Overview
+
+Overview
 The Intaglio State Comparator is a computer-vision research tool designed to support connoisseurship and technical art history.
+
 Given two digitized impressions of the same intaglio plate (etching, engraving, drypoint, mezzotint, etc.), the app:
 Standardizes both images
+
 Aligns the second impression to the first
+
 Computes pixel-level difference maps
+
 Generates interpretive overlays highlighting where lines, tone, or plate condition differ
+
 Allows interactive exploration via toggles, thresholding, inversion, and visibility controls
+
 The app is optimized for:
 comparing different states of a plate
 studying plate wear, rework, foul biting, drypoint burr
