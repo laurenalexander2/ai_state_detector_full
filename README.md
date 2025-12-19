@@ -74,7 +74,7 @@ Provides the interactive web interface:
 
 ---
 
-# 🔬 **Image Processing Pipeline**
+# **Image Processing Pipeline**
 
 ### **1. Preprocessing**
 - Convert to grayscale  
