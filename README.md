@@ -15,16 +15,6 @@ Given two digitized impressions of the *same intaglio plate* (etching, engraving
 - Generates interpretive overlays showing where linework, tone, or plate condition differ  
 - Provides interactive controls for thresholding, inversion, visibility, and comparison direction  
 
-**The tool does *not* assign states automatically** — it surfaces subtleties worth close looking.
-
-### Optimized for:
-
-- Comparing **different states** of a plate  
-- Studying **plate wear**, rework, foul biting, drypoint burr  
-- Identifying **strengthened or effaced lines**  
-- Examining differences between impressions across collections  
-- Supporting **cataloging**, scholarly research, and catalogues raisonnés  
-
 ---
 
 # **Technology Stack**
