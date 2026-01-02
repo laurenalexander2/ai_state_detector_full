@@ -1,5 +1,5 @@
-# **Intaglio State Comparator**  
-### *A Computer Vision Tool for Comparative Analysis of Intaglio Print Impressions*
+# **Print Comparator**  
+### *A Computer Vision Tool for Comparative Analysis of Print Impressions*
 
 ---
 
