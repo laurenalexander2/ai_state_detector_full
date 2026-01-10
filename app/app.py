@@ -1,4 +1,5 @@
 import sys
+import time
 from pathlib import Path
 from io import BytesIO
 
@@ -7,7 +8,17 @@ import numpy as np
 import streamlit as st
 from PIL import Image
 
-# Make src importable when running `streamlit run app/app.py`
+# Optional: smooth auto-refresh for the alignment wipe animation.
+# If missing, the app still runs (wipe just won't auto-animate).
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:
+    st_autorefresh = None
+
+
+# -------------------------------------------------
+# Path setup
+# -------------------------------------------------
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
@@ -15,422 +26,346 @@ if str(SRC) not in sys.path:
 
 from preprocess import preprocess
 from align import align_images
-from diffmaps import (
-    compute_diff_mask,      # still imported in case you want it later
-    create_overlay,
-    compute_edge_line_mask,
-    color_overlay_two,
-)
+from diffmaps import create_overlay
 from utils import bgr_to_rgb
 
 
+# -------------------------------------------------
+# Page config
+# -------------------------------------------------
 st.set_page_config(page_title="Intaglio State Comparator", layout="centered")
-
 st.title("Intaglio State Comparator")
 
 st.markdown(
     """
-Upload two digitized impressions of the **same intaglio plate** – for example,
-different states, different printings, or impressions from different collections.
+Compare two impressions of the same intaglio plate.
 
-This tool will:
+This tool:
+1) Standardizes both images (crop/resize/normalize)
+2) Aligns the second impression to the first
+3) Visualizes differences to support close looking
 
-1. **Standardize** both images (crop, resize, and normalize contrast)  
-2. **Align** the second impression onto the first using feature-based registration  
-3. **Compare** the aligned impressions using several visual modes:
-
-   - **Tonal difference** – highlights regions where overall darkness, plate wear, or inking differ  
-   - **Line-sensitive color overlay** – tints one impression red and the other cyan so added or strengthened lines appear as color fringes  
-   - **Experimental line difference** – a work-in-progress mode that tries to isolate changed line segments
-
-The goal is to **support close looking and connoisseurship**:
-
-- surfacing areas where cross-hatching has been reinforced or effaced  
-- drawing attention to retouching, plate wear, or damage  
-- helping you move quickly between impressions without losing your place on the plate
-
-It does **not** assign states or make attributions on its own.  
-All visualizations should be read as prompts for expert interpretation, not as final judgments.
 """
 )
 
-# ------------------------------------------------------------------
-# Session state for swap & visibility toggles
-# ------------------------------------------------------------------
-if "swap" not in st.session_state:
-    st.session_state.swap = False
-if "hide_base" not in st.session_state:
-    st.session_state.hide_base = False
-if "hide_target" not in st.session_state:
-    st.session_state.hide_target = False
+# -------------------------------------------------
+# Example discovery
+# -------------------------------------------------
+IMG_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+UPLOAD_TYPES = ["jpg", "jpeg", "png", "tif", "tiff"]
+EXAMPLES_DIR = ROOT / "app" / "examples"
 
-# -----------------------------
-# Uploaders + top swap button
-# -----------------------------
-col1, col2, col3 = st.columns([2, 2, 1])
 
-with col1:
-    uploaded1 = st.file_uploader(
-        "Upload first impression",
-        type=["jpg", "jpeg", "png", "tif", "tiff"],
-        key="img1",
-    )
+def find_example_pairs(examples_dir: Path) -> dict[str, tuple[Path, Path]]:
+    """
+    app/examples/1/, 2/, 3/, ...
+    Each folder must contain exactly two images.
+    Alphabetically first filename = base
+    Alphabetically second filename = target
+    """
+    pairs: dict[str, tuple[Path, Path]] = {}
+    if not examples_dir.exists():
+        return pairs
 
-with col2:
-    uploaded2 = st.file_uploader(
-        "Upload second impression",
-        type=["jpg", "jpeg", "png", "tif", "tiff"],
-        key="img2",
-    )
+    for d in sorted(p for p in examples_dir.iterdir() if p.is_dir()):
+        imgs = sorted(
+            [p for p in d.iterdir() if p.is_file() and p.suffix.lower() in IMG_EXTS],
+            key=lambda p: p.name.lower(),
+        )
+        if len(imgs) == 2:
+            pairs[d.name] = (imgs[0], imgs[1])
 
-with col3:
-    st.write(" ")
-    st.write(" ")
-    if st.button("Swap base/target"):
-        st.session_state.swap = not st.session_state.swap
+    return pairs
 
-# ----------------------------------------------------------
-# Proceed once both uploads are present (in either order)
-# ----------------------------------------------------------
-if uploaded1 is not None and uploaded2 is not None:
-    # Decide which uploaded file is base vs target according to swap flag
-    if not st.session_state.swap:
-        base_uploaded = uploaded1
-        target_uploaded = uploaded2
+
+@st.cache_data(show_spinner=False)
+def read_bytes(path_str: str) -> bytes:
+    return Path(path_str).read_bytes()
+
+
+@st.cache_data(show_spinner=False)
+def decode_bgr(data: bytes) -> np.ndarray:
+    arr = np.frombuffer(data, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("Failed to decode image.")
+    return img
+
+
+@st.cache_data(show_spinner=False)
+def run_preprocess(bgr: np.ndarray, max_width: int) -> np.ndarray:
+    return preprocess(bgr, max_width=max_width)
+
+
+@st.cache_data(show_spinner=False)
+def run_align(base_gray: np.ndarray, target_gray: np.ndarray):
+    return align_images(base_gray, target_gray)
+
+
+def invert_luminance(rgb: np.ndarray) -> np.ndarray:
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    hsv[:, :, 2] = 255 - hsv[:, :, 2]
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+
+
+def make_color_overlay(base_gray: np.ndarray, target_gray: np.ndarray, swap: bool = False) -> np.ndarray:
+    """
+    Default: base=red, target=cyan (G+B).
+    swap=True: base=cyan, target=red.
+    """
+    b = base_gray.astype(np.float32) / 255.0
+    t = target_gray.astype(np.float32) / 255.0
+    z = np.zeros_like(b)
+
+    if not swap:
+        base_rgb = np.stack([b, z, z], axis=2)       # red
+        targ_rgb = np.stack([z, t, t], axis=2)       # cyan
     else:
-        base_uploaded = uploaded2
-        target_uploaded = uploaded1
+        base_rgb = np.stack([z, b, b], axis=2)       # cyan
+        targ_rgb = np.stack([t, z, z], axis=2)       # red
 
-    # Read bytes into OpenCV images (base, then target)
-    file_bytes_base = np.asarray(bytearray(base_uploaded.read()), dtype=np.uint8)
-    file_bytes_target = np.asarray(bytearray(target_uploaded.read()), dtype=np.uint8)
+    out = np.clip(base_rgb + targ_rgb, 0, 1)
+    return (out * 255).astype(np.uint8)
 
-    base_bgr = cv2.imdecode(file_bytes_base, cv2.IMREAD_COLOR)
-    target_bgr = cv2.imdecode(file_bytes_target, cv2.IMREAD_COLOR)
 
-    if base_bgr is None or target_bgr is None:
-        st.error("Failed to decode one or both images.")
-        st.stop()
+def wipe_view(base: np.ndarray, aligned: np.ndarray, pct: int) -> np.ndarray:
+    """
+    Simple wipe: left portion base, right portion aligned target.
+    pct 0..100 moves boundary.
+    """
+    h, w = base.shape
+    x = int(w * pct / 100.0)
+    out = np.zeros_like(base)
+    out[:, :x] = base[:, :x]
+    out[:, x:] = aligned[:, x:]
+    return out
 
-    # Save original RGB versions for display + download
-    base_rgb_original = cv2.cvtColor(base_bgr, cv2.COLOR_BGR2RGB)
-    target_rgb_original = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2RGB)
 
-    # ------------------------------
-    # Show original uploaded images
-    # ------------------------------
-    st.subheader("Original uploaded images")
-    oc1, oc2 = st.columns(2)
-    with oc1:
-        st.image(
-            base_rgb_original,
-            caption="Base (original uploaded)",
-            use_container_width=True,
-        )
-    with oc2:
-        st.image(
-            target_rgb_original,
-            caption="Target (original uploaded)",
-            use_container_width=True,
-        )
+def stack_triptych(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
+    imgs = [a, b, c]
+    h = max(img.shape[0] for img in imgs)
+    resized = []
+    for img in imgs:
+        if img.shape[0] != h:
+            s = h / img.shape[0]
+            img = cv2.resize(img, (int(img.shape[1] * s), h), interpolation=cv2.INTER_AREA)
+        resized.append(img)
+    return np.hstack(resized)
 
-    st.markdown("---")
 
-    # ------------------------------
-    # Preprocessing
-    # ------------------------------
-    max_width = st.slider(
-        "Max processing width (pixels)", 800, 3000, 2000, step=100
+# -------------------------------------------------
+# Session state
+# -------------------------------------------------
+if "base_bytes" not in st.session_state:
+    st.session_state.base_bytes = None
+if "target_bytes" not in st.session_state:
+    st.session_state.target_bytes = None
+
+
+# -------------------------------------------------
+# Inputs (examples-first)
+# -------------------------------------------------
+st.subheader("Inputs")
+pairs = find_example_pairs(EXAMPLES_DIR)
+
+tab_ex, tab_up = st.tabs(["Use an example", "Upload your own"])
+
+with tab_ex:
+    if not pairs:
+        st.warning("No valid examples found in app/examples/ (each folder must contain exactly 2 images).")
+    else:
+        example_names = list(pairs.keys())
+        chosen = st.selectbox("Choose an example", example_names, index=0)
+
+        # Preview base image (alphabetically first) immediately on selection
+        base_p, targ_p = pairs[chosen]
+        try:
+            preview_bytes = read_bytes(str(base_p))
+            preview_bgr = decode_bgr(preview_bytes)
+            preview_rgb = cv2.cvtColor(preview_bgr, cv2.COLOR_BGR2RGB)
+            st.image(
+                preview_rgb,
+                caption=f"Preview (base): {base_p.name}",
+                use_container_width=True,
+            )
+        except Exception as e:
+            st.warning(f"Could not preview example: {e}")
+
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            if st.button("Use example", type="primary"):
+                st.session_state.base_bytes = read_bytes(str(base_p))
+                st.session_state.target_bytes = read_bytes(str(targ_p))
+        with c2:
+            st.caption(f"Base: {base_p.name} • Target: {targ_p.name}")
+
+with tab_up:
+    u1 = st.file_uploader("Base image", type=UPLOAD_TYPES, key="upload_base")
+    u2 = st.file_uploader("Target image", type=UPLOAD_TYPES, key="upload_target")
+    st.caption("Uploads override the example currently loaded.")
+    if u1 and u2:
+        st.session_state.base_bytes = u1.getvalue()
+        st.session_state.target_bytes = u2.getvalue()
+
+if not st.session_state.base_bytes or not st.session_state.target_bytes:
+    st.info("Select an example (recommended) or upload two images to begin.")
+    st.stop()
+
+
+# -------------------------------------------------
+# Decode originals
+# -------------------------------------------------
+try:
+    base_bgr = decode_bgr(st.session_state.base_bytes)
+    target_bgr = decode_bgr(st.session_state.target_bytes)
+except Exception as e:
+    st.error(f"Failed to decode one or both images: {e}")
+    st.stop()
+
+base_rgb = cv2.cvtColor(base_bgr, cv2.COLOR_BGR2RGB)
+target_rgb = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2RGB)
+
+
+# -------------------------------------------------
+# Processing settings
+# -------------------------------------------------
+st.subheader("Processing settings")
+
+max_width = st.slider(
+    "Max processing width (px)",
+    min_value=1200,
+    max_value=6000,
+    value=3000,
+    step=200,
+)
+
+with st.expander("Advanced"):
+    st.caption(
+        "Higher values can improve fine detail but slow alignment a lot and increase memory use. "
+        "If alignment becomes slow or unstable, reduce this."
     )
+    if st.checkbox("Enable extreme resolutions", value=False):
+        max_width = st.slider(
+            "Extreme max width (use sparingly)",
+            min_value=6000,
+            max_value=10000,
+            value=8000,
+            step=500,
+        )
 
-    try:
-        base_gray = preprocess(base_bgr, max_width=max_width)
-        target_gray = preprocess(target_bgr, max_width=max_width)
-    except Exception as e:
-        st.error(f"Error during preprocessing: {e}")
-        st.stop()
 
-    st.subheader("Preprocessed inputs")
+# -------------------------------------------------
+# Preprocessing
+# -------------------------------------------------
+show_pre = st.toggle("Show preprocessing preview (before / after)", value=False)
+
+try:
+    base_gray = run_preprocess(base_bgr, max_width)
+    target_gray = run_preprocess(target_bgr, max_width)
+except Exception as e:
+    st.error(f"Error during preprocessing: {e}")
+    st.stop()
+
+if show_pre:
+    st.caption("Original (RGB) and preprocessed (grayscale) used for alignment/comparison.")
     c1, c2 = st.columns(2)
     with c1:
-        st.image(
-            base_gray,
-            caption="Base (preprocessed)",
-            use_container_width=True,
-            clamp=True,
-        )
+        st.image(base_rgb, caption="Base original", use_container_width=True)
+        st.image(base_gray, caption="Base preprocessed", use_container_width=True, clamp=True)
     with c2:
-        st.image(
-            target_gray,
-            caption="Target (preprocessed)",
-            use_container_width=True,
-            clamp=True,
-        )
+        st.image(target_rgb, caption="Target original", use_container_width=True)
+        st.image(target_gray, caption="Target preprocessed", use_container_width=True, clamp=True)
 
-    # ------------------------------
-    # Alignment
-    # ------------------------------
-    st.markdown("---")
-    st.subheader("Alignment")
 
-    try:
-        aligned_target, H = align_images(base_gray, target_gray)
-        st.success("Alignment succeeded.")
-    except Exception as e:
-        st.error(f"Alignment failed: {e}")
-        st.stop()
+# -------------------------------------------------
+# Alignment (auto-looping wipe)
+# -------------------------------------------------
+st.subheader("Alignment")
 
-    # Center the alignment image in a narrower middle column
-    a1, a2, a3 = st.columns([1, 2, 1])
-    with a2:
-        st.image(
-            aligned_target,
-            caption="Target aligned to base",
-            use_container_width=True,
-            clamp=True,
-        )
+try:
+    aligned_target, H = run_align(base_gray, target_gray)
+    st.success("Alignment succeeded.")
+except Exception as e:
+    st.error(f"Alignment failed: {e}")
+    st.stop()
 
-    # -------------------------------------------------
-    # Helper: invert luminance while preserving colors
-    # -------------------------------------------------
-    def invert_luminance(rgb_img: np.ndarray) -> np.ndarray:
-        """Invert brightness only; keep hue/saturation (red/cyan stay red/cyan)."""
-        hsv = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2HSV)
-        hsv[:, :, 2] = 255 - hsv[:, :, 2]
-        return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+WIPE_PERIOD_SEC = 10.0  # full left->right sweep duration
 
-    # -------------------------------------------------
-    # Helper: stack originals + composite side by side
-    # -------------------------------------------------
-    def stack_triptych(base_rgb: np.ndarray,
-                       target_rgb: np.ndarray,
-                       composite_rgb: np.ndarray) -> np.ndarray:
-        """Resize all to same height and stack horizontally."""
-        imgs = [base_rgb, target_rgb, composite_rgb]
-        # Ensure uint8
-        imgs = [img.astype("uint8") for img in imgs]
+if st_autorefresh is None:
+    st.caption("Auto-wipe animation requires `streamlit-autorefresh` (optional).")
+    st.caption("Install: `pip install streamlit-autorefresh` (then it will loop automatically).")
+    wipe_pct = st.slider("Alignment wipe", 0, 100, 50, 1)
+else:
+    # ~12.5 fps refresh (80ms). Lower fps reduces CPU usage.
+    st_autorefresh(interval=80, key="alignment_wipe_refresh")
+    phase = (time.time() % WIPE_PERIOD_SEC) / WIPE_PERIOD_SEC
+    wipe_pct = int(phase * 100)
 
-        max_h = max(img.shape[0] for img in imgs)
-        resized = []
-        for img in imgs:
-            h, w = img.shape[:2]
-            if h != max_h:
-                scale = max_h / h
-                new_w = int(w * scale)
-                img_resized = cv2.resize(img, (new_w, max_h), interpolation=cv2.INTER_AREA)
-            else:
-                img_resized = img
-            resized.append(img_resized)
+wipe_img = wipe_view(base_gray, aligned_target, wipe_pct)
+a1, a2, a3 = st.columns([1, 2, 1])
+with a2:
+    st.image(wipe_img, caption="Alignment wipe", use_container_width=True, clamp=True)
 
-        combined = np.hstack(resized)
-        return combined
 
-    # ===== Comparison modes =====
-    st.markdown("---")
-    st.subheader("Difference map and overlay")
+# -------------------------------------------------
+# Comparison
+# -------------------------------------------------
+st.subheader("Comparison")
 
-    mode = st.radio(
-        "Choose view / algorithm",
-        (
-            "Tonal difference (current implementation)",
-            "Experimental line difference (edge XOR)",
-            "Color overlay (red vs cyan)",
-        ),
-    )
+mode = st.radio(
+    "View mode",
+    ["Color overlay (red vs cyan)", "Tonal difference"],
+    index=0,  # favor color overlay
+)
 
-    # This will hold the currently displayed composite
-    composite_rgb = None
+invert = st.checkbox("Invert black/white", value=False)
 
-    # -------------------------------------------------
-    # 1) Tonal difference mode (with threshold slider)
-    # -------------------------------------------------
-    if mode == "Tonal difference (current implementation)":
-        # Slider to adjust how sensitive the binary mask is
-        threshold = st.slider(
-            "Mask sensitivity (higher = stricter mask)",
-            min_value=1,
-            max_value=255,
-            value=40,
-            step=1,
-        )
+if mode == "Color overlay (red vs cyan)":
+    swap_colors = st.checkbox("Swap overlay colors (red ↔ cyan)", value=False)
+    overlay = make_color_overlay(base_gray, aligned_target, swap=swap_colors)
+    if invert:
+        overlay = invert_luminance(overlay)
 
-        try:
-            # Raw absolute difference between base and aligned target
-            diff_raw = cv2.absdiff(base_gray, aligned_target)
+    st.caption("Base original • Target original • Composite overlay")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.image(base_rgb, caption="Base", use_container_width=True)
+    with c2:
+        st.image(target_rgb, caption="Target", use_container_width=True)
+    with c3:
+        st.image(overlay, caption="Overlay", use_container_width=True, clamp=True)
 
-            # Normalize for visualization
-            norm_diff = cv2.normalize(diff_raw, None, 0, 255, cv2.NORM_MINMAX)
+else:
+    thresh = st.slider("Mask sensitivity (higher = stricter mask)", 1, 255, 40, 1)
 
-            # Manual threshold -> binary mask
-            _, mask = cv2.threshold(diff_raw, threshold, 255, cv2.THRESH_BINARY)
-        except Exception as e:
-            st.error(f"Difference computation failed: {e}")
-            st.stop()
+    diff = cv2.absdiff(base_gray, aligned_target)
+    norm = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)
+    _, mask = cv2.threshold(diff, thresh, 255, cv2.THRESH_BINARY)
 
-        c3, c4 = st.columns(2)
-        with c3:
-            st.image(
-                norm_diff,
-                caption="Tonal / intensity difference",
-                use_container_width=True,
-                clamp=True,
-            )
-        with c4:
-            st.image(
-                mask,
-                caption="Binary mask (tonal diff, thresholded)",
-                use_container_width=True,
-                clamp=True,
-            )
+    overlay = bgr_to_rgb(create_overlay(base_gray, mask, alpha=0.5))
+    if invert:
+        overlay = invert_luminance(overlay)
 
-        overlay_bgr = create_overlay(base_gray, mask, alpha=0.5)
-        overlay_rgb = bgr_to_rgb(overlay_bgr)
+    st.caption("Tonal difference • Binary mask • Overlay")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.image(norm, caption="Tonal difference", use_container_width=True, clamp=True)
+    with c2:
+        st.image(mask, caption="Binary mask", use_container_width=True, clamp=True)
+    with c3:
+        st.image(overlay, caption="Overlay", use_container_width=True, clamp=True)
 
-        invert_bw = st.checkbox(
-            "Invert black/white in composite",
-            key="invert_bw_tonal",
-        )
-        if invert_bw:
-            overlay_rgb = invert_luminance(overlay_rgb)
 
-        composite_rgb = overlay_rgb  # track current composite
+# -------------------------------------------------
+# Download
+# -------------------------------------------------
+combined = stack_triptych(base_rgb, target_rgb, overlay)
+buf = BytesIO()
+Image.fromarray(combined).save(buf, format="PNG")
 
-        st.subheader("Overlay visualization")
-        o1, o2, o3 = st.columns([1, 2, 1])
-        with o2:
-            st.image(
-                overlay_rgb,
-                caption="Overlay (tonal difference)",
-                use_container_width=True,
-                clamp=True,
-            )
-
-    # -------------------------------------------------
-    # 2) Line difference mode
-    # -------------------------------------------------
-    elif mode == "Experimental line difference (edge XOR)":
-        try:
-            edge_diff, line_mask = compute_edge_line_mask(
-                base_gray, aligned_target
-            )
-        except Exception as e:
-            st.error(f"Edge-line difference failed: {e}")
-            st.stop()
-
-        c3, c4 = st.columns(2)
-        with c3:
-            st.image(
-                edge_diff,
-                caption="Changed line segments (edge XOR, experimental)",
-                use_container_width=True,
-                clamp=True,
-            )
-        with c4:
-            st.image(
-                line_mask,
-                caption="Binary mask of changed lines",
-                use_container_width=True,
-                clamp=True,
-            )
-
-        overlay_bgr = create_overlay(base_gray, line_mask, alpha=0.6)
-        overlay_rgb = bgr_to_rgb(overlay_bgr)
-
-        invert_bw = st.checkbox(
-            "Invert black/white in composite",
-            key="invert_bw_line",
-        )
-        if invert_bw:
-            overlay_rgb = invert_luminance(overlay_rgb)
-
-        composite_rgb = overlay_rgb  # track current composite
-
-        st.subheader("Overlay visualization")
-        o1, o2, o3 = st.columns([1, 2, 1])
-        with o2:
-            st.image(
-                overlay_rgb,
-                caption="Changed lines highlighted in red (experimental)",
-                use_container_width=True,
-                clamp=True,
-            )
-
-    # -------------------------------------------------
-    # 3) Color overlay mode (with hide/show + invert)
-    # -------------------------------------------------
-    else:  # "Color overlay (red vs cyan)"
-
-        # Buttons to hide/show base/target and swap again
-        cA, cB, cC = st.columns(3)
-        with cA:
-            if st.button("Hide Base (red)"):
-                st.session_state.hide_base = not st.session_state.hide_base
-        with cB:
-            if st.button("Hide Target (cyan)"):
-                st.session_state.hide_target = not st.session_state.hide_target
-        with cC:
-            if st.button("Swap base/target (here)"):
-                st.session_state.swap = not st.session_state.swap
-
-        # Normalize to 0–1
-        base_norm = base_gray.astype(np.float32) / 255.0
-        target_norm = aligned_target.astype(np.float32) / 255.0
-
-        # Tint base (red) and target (cyan)
-        zeros_base = np.zeros_like(base_norm, dtype=np.float32)
-        zeros_target = np.zeros_like(target_norm, dtype=np.float32)
-
-        base_rgb = np.stack([base_norm, zeros_base, zeros_base], axis=2)
-        target_rgb = np.stack([zeros_target, target_norm, target_norm], axis=2)
-
-        # Apply hide toggles
-        if st.session_state.hide_base:
-            base_rgb[:] = 0
-        if st.session_state.hide_target:
-            target_rgb[:] = 0
-
-        # Combine and scale back to 0–255 uint8
-        color_rgb = base_rgb + target_rgb
-        color_rgb = np.clip(color_rgb, 0.0, 1.0)
-        color_rgb = (color_rgb * 255).astype(np.uint8)
-
-        invert_bw = st.checkbox(
-            "Invert black/white in composite",
-            key="invert_bw_color",
-        )
-        if invert_bw:
-            color_rgb = invert_luminance(color_rgb)
-
-        composite_rgb = color_rgb  # track current composite
-
-        st.subheader("Color overlay of both impressions")
-        o1, o2, o3 = st.columns([1, 2, 1])
-        with o2:
-            st.image(
-                color_rgb,
-                caption="Base = red, Target = cyan (toggles below)",
-                use_container_width=True,
-                clamp=True,
-            )
-
-    # -------------------------------------------------
-    # Download button: originals + current composite
-    # -------------------------------------------------
-    if composite_rgb is not None:
-        combined = stack_triptych(
-            base_rgb_original,
-            target_rgb_original,
-            composite_rgb,
-        )
-        pil_img = Image.fromarray(combined)
-        buf = BytesIO()
-        pil_img.save(buf, format="PNG")
-        byte_im = buf.getvalue()
-
-        st.markdown("---")
-        st.download_button(
-            label="📥 Download originals + current composite (PNG)",
-            data=byte_im,
-            file_name="intaglio_state_comparison.png",
-            mime="image/png",
-        )
+st.download_button(
+    "Download originals + overlay (PNG)",
+    data=buf.getvalue(),
+    file_name="intaglio_state_comparison.png",
+    mime="image/png",
+)
