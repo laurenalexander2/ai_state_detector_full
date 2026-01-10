@@ -1,5 +1,6 @@
 import sys
 import time
+import hashlib
 from pathlib import Path
 from io import BytesIO
 
@@ -8,8 +9,8 @@ import numpy as np
 import streamlit as st
 from PIL import Image
 
-# Optional: smooth auto-refresh for the alignment wipe animation.
-# If missing, the app still runs (wipe just won't auto-animate).
+# Optional: enables auto-animated swipe via timed reruns.
+# If missing, alignment swipe falls back to a manual slider.
 try:
     from streamlit_autorefresh import st_autorefresh
 except Exception:
@@ -40,28 +41,28 @@ st.markdown(
     """
 Compare two impressions of the same intaglio plate.
 
-This tool:
-1) Standardizes both images (crop/resize/normalize)
-2) Aligns the second impression to the first
-3) Visualizes differences to support close looking
-
+- Examples-first
+- Alignment swipe is a visual analysis mode
+- Alignment swipe can run automatically (autoplay) if `streamlit-autorefresh` is installed
 """
 )
 
 # -------------------------------------------------
-# Example discovery
+# Constants / paths
 # -------------------------------------------------
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 UPLOAD_TYPES = ["jpg", "jpeg", "png", "tif", "tiff"]
 EXAMPLES_DIR = ROOT / "app" / "examples"
 
 
+# -------------------------------------------------
+# Helpers
+# -------------------------------------------------
 def find_example_pairs(examples_dir: Path) -> dict[str, tuple[Path, Path]]:
     """
     app/examples/1/, 2/, 3/, ...
     Each folder must contain exactly two images.
-    Alphabetically first filename = base
-    Alphabetically second filename = target
+    Alphabetically first filename = base, second = target.
     """
     pairs: dict[str, tuple[Path, Path]] = {}
     if not examples_dir.exists():
@@ -74,7 +75,6 @@ def find_example_pairs(examples_dir: Path) -> dict[str, tuple[Path, Path]]:
         )
         if len(imgs) == 2:
             pairs[d.name] = (imgs[0], imgs[1])
-
     return pairs
 
 
@@ -118,26 +118,28 @@ def make_color_overlay(base_gray: np.ndarray, target_gray: np.ndarray, swap: boo
     z = np.zeros_like(b)
 
     if not swap:
-        base_rgb = np.stack([b, z, z], axis=2)       # red
-        targ_rgb = np.stack([z, t, t], axis=2)       # cyan
+        base_rgb = np.stack([b, z, z], axis=2)  # red
+        targ_rgb = np.stack([z, t, t], axis=2)  # cyan
     else:
-        base_rgb = np.stack([z, b, b], axis=2)       # cyan
-        targ_rgb = np.stack([t, z, z], axis=2)       # red
+        base_rgb = np.stack([z, b, b], axis=2)  # cyan
+        targ_rgb = np.stack([t, z, z], axis=2)  # red
 
     out = np.clip(base_rgb + targ_rgb, 0, 1)
     return (out * 255).astype(np.uint8)
 
 
-def wipe_view(base: np.ndarray, aligned: np.ndarray, pct: int) -> np.ndarray:
+def wipe_base_to_target(base_img: np.ndarray, target_img: np.ndarray, pct: int) -> np.ndarray:
     """
-    Simple wipe: left portion base, right portion aligned target.
-    pct 0..100 moves boundary.
+    Base -> target reveal (left-to-right):
+      pct=0   => 100% base
+      pct=100 => 100% target
+    Works for grayscale or RGB (shapes must match).
     """
-    h, w = base.shape
+    h, w = base_img.shape[:2]
     x = int(w * pct / 100.0)
-    out = np.zeros_like(base)
-    out[:, :x] = base[:, :x]
-    out[:, x:] = aligned[:, x:]
+    out = base_img.copy()
+    if x > 0:
+        out[:, :x] = target_img[:, :x]
     return out
 
 
@@ -153,6 +155,20 @@ def stack_triptych(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
     return np.hstack(resized)
 
 
+def _bytes_fingerprint(data: bytes, take: int = 4096) -> bytes:
+    if len(data) <= take * 2:
+        return data
+    return data[:take] + data[-take:]
+
+
+def compute_token(base_bytes: bytes, target_bytes: bytes, max_width: int) -> str:
+    h = hashlib.sha1()
+    h.update(_bytes_fingerprint(base_bytes))
+    h.update(_bytes_fingerprint(target_bytes))
+    h.update(str(max_width).encode("utf-8"))
+    return h.hexdigest()
+
+
 # -------------------------------------------------
 # Session state
 # -------------------------------------------------
@@ -161,13 +177,24 @@ if "base_bytes" not in st.session_state:
 if "target_bytes" not in st.session_state:
     st.session_state.target_bytes = None
 
+# derived cache keyed by (base_bytes, target_bytes, max_width)
+if "derived_token" not in st.session_state:
+    st.session_state.derived_token = None
+if "base_gray" not in st.session_state:
+    st.session_state.base_gray = None
+if "target_gray" not in st.session_state:
+    st.session_state.target_gray = None
+if "aligned_target" not in st.session_state:
+    st.session_state.aligned_target = None
+if "H" not in st.session_state:
+    st.session_state.H = None
+
 
 # -------------------------------------------------
 # Inputs (examples-first)
 # -------------------------------------------------
 st.subheader("Inputs")
 pairs = find_example_pairs(EXAMPLES_DIR)
-
 tab_ex, tab_up = st.tabs(["Use an example", "Upload your own"])
 
 with tab_ex:
@@ -175,29 +202,26 @@ with tab_ex:
         st.warning("No valid examples found in app/examples/ (each folder must contain exactly 2 images).")
     else:
         example_names = list(pairs.keys())
-        chosen = st.selectbox("Choose an example", example_names, index=0)
-
-        # Preview base image (alphabetically first) immediately on selection
+        chosen = st.selectbox("Choose an example folder", example_names, index=0)
         base_p, targ_p = pairs[chosen]
-        try:
-            preview_bytes = read_bytes(str(base_p))
-            preview_bgr = decode_bgr(preview_bytes)
-            preview_rgb = cv2.cvtColor(preview_bgr, cv2.COLOR_BGR2RGB)
-            st.image(
-                preview_rgb,
-                caption=f"Preview (base): {base_p.name}",
-                use_container_width=True,
-            )
-        except Exception as e:
-            st.warning(f"Could not preview example: {e}")
 
-        c1, c2 = st.columns([1, 2])
-        with c1:
-            if st.button("Use example", type="primary"):
-                st.session_state.base_bytes = read_bytes(str(base_p))
-                st.session_state.target_bytes = read_bytes(str(targ_p))
-        with c2:
-            st.caption(f"Base: {base_p.name} • Target: {targ_p.name}")
+        with st.container(border=True):
+            st.markdown("**Example preview (base + target)**")
+            try:
+                base_preview = cv2.cvtColor(decode_bgr(read_bytes(str(base_p))), cv2.COLOR_BGR2RGB)
+                targ_preview = cv2.cvtColor(decode_bgr(read_bytes(str(targ_p))), cv2.COLOR_BGR2RGB)
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.image(base_preview, caption=f"Base: {base_p.name}", use_container_width=True)
+                with c2:
+                    st.image(targ_preview, caption=f"Target: {targ_p.name}", use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not preview example: {e}")
+
+        if st.button("Use this example", type="primary"):
+            st.session_state.base_bytes = read_bytes(str(base_p))
+            st.session_state.target_bytes = read_bytes(str(targ_p))
+            st.session_state.derived_token = None  # invalidate derived results
 
 with tab_up:
     u1 = st.file_uploader("Base image", type=UPLOAD_TYPES, key="upload_base")
@@ -206,29 +230,31 @@ with tab_up:
     if u1 and u2:
         st.session_state.base_bytes = u1.getvalue()
         st.session_state.target_bytes = u2.getvalue()
+        st.session_state.derived_token = None  # invalidate derived results
 
 if not st.session_state.base_bytes or not st.session_state.target_bytes:
-    st.info("Select an example (recommended) or upload two images to begin.")
+    st.info("Choose an example (recommended) or upload two images to begin.")
     st.stop()
 
-
-# -------------------------------------------------
 # Decode originals
-# -------------------------------------------------
-try:
-    base_bgr = decode_bgr(st.session_state.base_bytes)
-    target_bgr = decode_bgr(st.session_state.target_bytes)
-except Exception as e:
-    st.error(f"Failed to decode one or both images: {e}")
-    st.stop()
-
+base_bgr = decode_bgr(st.session_state.base_bytes)
+target_bgr = decode_bgr(st.session_state.target_bytes)
 base_rgb = cv2.cvtColor(base_bgr, cv2.COLOR_BGR2RGB)
 target_rgb = cv2.cvtColor(target_bgr, cv2.COLOR_BGR2RGB)
 
+with st.container(border=True):
+    st.markdown("**Loaded pair**")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.image(base_rgb, caption="Base (loaded)", use_container_width=True)
+    with c2:
+        st.image(target_rgb, caption="Target (loaded)", use_container_width=True)
+
 
 # -------------------------------------------------
-# Processing settings
+# Processing settings (no pipeline buttons)
 # -------------------------------------------------
+st.markdown("---")
 st.subheader("Processing settings")
 
 max_width = st.slider(
@@ -241,103 +267,64 @@ max_width = st.slider(
 
 with st.expander("Advanced"):
     st.caption(
-        "Higher values can improve fine detail but slow alignment a lot and increase memory use. "
-        "If alignment becomes slow or unstable, reduce this."
+        "Higher values can improve fine detail but slow alignment and increase memory use. "
+        "If things get slow or unstable, reduce this."
     )
     if st.checkbox("Enable extreme resolutions", value=False):
-        max_width = st.slider(
-            "Extreme max width (use sparingly)",
-            min_value=6000,
-            max_value=10000,
-            value=8000,
-            step=500,
-        )
+        max_width = st.slider("Extreme max width", 6000, 10000, 8000, 500)
+
+# Compute preprocess + alignment lazily (only when token changes)
+token = compute_token(st.session_state.base_bytes, st.session_state.target_bytes, max_width)
+if st.session_state.derived_token != token:
+    with st.spinner("Preprocessing and aligning..."):
+        base_gray = run_preprocess(base_bgr, max_width)
+        target_gray = run_preprocess(target_bgr, max_width)
+        aligned_target, H = run_align(base_gray, target_gray)
+    st.session_state.base_gray = base_gray
+    st.session_state.target_gray = target_gray
+    st.session_state.aligned_target = aligned_target
+    st.session_state.H = H
+    st.session_state.derived_token = token
+
+base_gray = st.session_state.base_gray
+target_gray = st.session_state.target_gray
+aligned_target = st.session_state.aligned_target
 
 
 # -------------------------------------------------
-# Preprocessing
+# Visual analysis modes
 # -------------------------------------------------
-show_pre = st.toggle("Show preprocessing preview (before / after)", value=False)
-
-try:
-    base_gray = run_preprocess(base_bgr, max_width)
-    target_gray = run_preprocess(target_bgr, max_width)
-except Exception as e:
-    st.error(f"Error during preprocessing: {e}")
-    st.stop()
-
-if show_pre:
-    st.caption("Original (RGB) and preprocessed (grayscale) used for alignment/comparison.")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.image(base_rgb, caption="Base original", use_container_width=True)
-        st.image(base_gray, caption="Base preprocessed", use_container_width=True, clamp=True)
-    with c2:
-        st.image(target_rgb, caption="Target original", use_container_width=True)
-        st.image(target_gray, caption="Target preprocessed", use_container_width=True, clamp=True)
-
-
-# -------------------------------------------------
-# Alignment (auto-looping wipe)
-# -------------------------------------------------
-st.subheader("Alignment")
-
-try:
-    aligned_target, H = run_align(base_gray, target_gray)
-    st.success("Alignment succeeded.")
-except Exception as e:
-    st.error(f"Alignment failed: {e}")
-    st.stop()
-
-WIPE_PERIOD_SEC = 10.0  # full left->right sweep duration
-
-if st_autorefresh is None:
-    st.caption("Auto-wipe animation requires `streamlit-autorefresh` (optional).")
-    st.caption("Install: `pip install streamlit-autorefresh` (then it will loop automatically).")
-    wipe_pct = st.slider("Alignment wipe", 0, 100, 50, 1)
-else:
-    # ~12.5 fps refresh (80ms). Lower fps reduces CPU usage.
-    st_autorefresh(interval=80, key="alignment_wipe_refresh")
-    phase = (time.time() % WIPE_PERIOD_SEC) / WIPE_PERIOD_SEC
-    wipe_pct = int(phase * 100)
-
-wipe_img = wipe_view(base_gray, aligned_target, wipe_pct)
-a1, a2, a3 = st.columns([1, 2, 1])
-with a2:
-    st.image(wipe_img, caption="Alignment wipe", use_container_width=True, clamp=True)
-
-
-# -------------------------------------------------
-# Comparison
-# -------------------------------------------------
-st.subheader("Comparison")
+st.markdown("---")
+st.subheader("Visual analysis")
 
 mode = st.radio(
-    "View mode",
-    ["Color overlay (red vs cyan)", "Tonal difference"],
-    index=0,  # favor color overlay
+    "Mode",
+    ["Color overlay (red vs cyan)", "Tonal difference", "Alignment swipe (autoplay)"],
+    index=0,
 )
 
 invert = st.checkbox("Invert black/white", value=False)
 
+# holds current view for the download triptych
+composite_rgb = None
+
 if mode == "Color overlay (red vs cyan)":
     swap_colors = st.checkbox("Swap overlay colors (red ↔ cyan)", value=False)
-    overlay = make_color_overlay(base_gray, aligned_target, swap=swap_colors)
+    composite_rgb = make_color_overlay(base_gray, aligned_target, swap=swap_colors)
     if invert:
-        overlay = invert_luminance(overlay)
+        composite_rgb = invert_luminance(composite_rgb)
 
     st.caption("Base original • Target original • Composite overlay")
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.image(base_rgb, caption="Base", use_container_width=True)
+        st.image(base_rgb, caption="Base original", use_container_width=True)
     with c2:
-        st.image(target_rgb, caption="Target", use_container_width=True)
+        st.image(target_rgb, caption="Target original", use_container_width=True)
     with c3:
-        st.image(overlay, caption="Overlay", use_container_width=True, clamp=True)
+        st.image(composite_rgb, caption="Overlay", use_container_width=True, clamp=True)
 
-else:
+elif mode == "Tonal difference":
     thresh = st.slider("Mask sensitivity (higher = stricter mask)", 1, 255, 40, 1)
-
     diff = cv2.absdiff(base_gray, aligned_target)
     norm = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)
     _, mask = cv2.threshold(diff, thresh, 255, cv2.THRESH_BINARY)
@@ -345,6 +332,8 @@ else:
     overlay = bgr_to_rgb(create_overlay(base_gray, mask, alpha=0.5))
     if invert:
         overlay = invert_luminance(overlay)
+
+    composite_rgb = overlay
 
     st.caption("Tonal difference • Binary mask • Overlay")
     c1, c2, c3 = st.columns(3)
@@ -355,16 +344,37 @@ else:
     with c3:
         st.image(overlay, caption="Overlay", use_container_width=True, clamp=True)
 
+else:
+    # "Automation": the swipe advances automatically on a timer.
+    # If autorefresh is unavailable, fall back to a manual slider.
+    WIPE_PERIOD_SEC = 10.0  # one full sweep duration
+    if st_autorefresh is None:
+        st.caption("Autoplay requires `streamlit-autorefresh`. Falling back to manual swipe.")
+        wipe_pct = st.slider("Swipe (base → aligned target)", 0, 100, 50, 1)
+    else:
+        # refresh ~10 fps; adjust if CPU is high
+        st_autorefresh(interval=100, key="swipe_autoplay_refresh")
+        phase = (time.time() % WIPE_PERIOD_SEC) / WIPE_PERIOD_SEC
+        wipe_pct = int(phase * 100)
+
+    swipe = wipe_base_to_target(base_gray, aligned_target, wipe_pct)
+    st.caption("Swipe viewer uses preprocessed images (grayscale).")
+    st.image(swipe, use_container_width=True, clamp=True)
+
+    # For download: convert to RGB for consistent stacking
+    composite_rgb = cv2.cvtColor(swipe, cv2.COLOR_GRAY2RGB)
+
 
 # -------------------------------------------------
-# Download
+# Download (originals + current view)
 # -------------------------------------------------
-combined = stack_triptych(base_rgb, target_rgb, overlay)
+st.markdown("---")
+combined = stack_triptych(base_rgb, target_rgb, composite_rgb)
 buf = BytesIO()
 Image.fromarray(combined).save(buf, format="PNG")
 
 st.download_button(
-    "Download originals + overlay (PNG)",
+    "Download originals + current view (PNG)",
     data=buf.getvalue(),
     file_name="intaglio_state_comparison.png",
     mime="image/png",
