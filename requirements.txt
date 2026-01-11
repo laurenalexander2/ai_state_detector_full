@@ -5,4 +5,4 @@ scikit-image
 scikit-learn
 matplotlib
 streamlit
-streamlit-autorefresh
+streamlit-autorefresh==1.0.1
