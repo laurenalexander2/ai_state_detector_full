@@ -114,6 +114,8 @@ Broad changes in plate tone
 
 The binary mask is derived via a fixed or user-adjustable threshold and is primarily intended as a region-of-interest extractor rather than a semantic classifier.
 
+---
+
 ### ***4. Color Overlay (Channel-Mapped Composite)***
 The color overlay maps each aligned impression into separate color channels:
 Base → Red
