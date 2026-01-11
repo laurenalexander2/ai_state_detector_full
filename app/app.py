@@ -26,14 +26,23 @@ from utils import bgr_to_rgb
 # Page config
 # -------------------------------------------------
 st.set_page_config(page_title="Intaglio State Comparator", layout="centered")
-st.title("Intaglio State Comparator")
+st.title("Computer-Vision Print Comparator")
 
 st.markdown(
     """
-Compare two impressions of the same intaglio plate.
+    Lauren Alexander / December 2025
 
-- Examples-first
-- Visual analysis modes: **Color overlay** (default) and **Tonal difference**
+Workflow:
+1) **Load two images** (examples are provided, or upload your own)  
+2) **Preprocess** both images to standardize scale and tonal range  
+3) **Align** the target image onto the base using feature-based homography  
+4) **Visualize differences** with:
+   - **Color overlay (red vs cyan)**: impressions mapped to color channels; overlaps neutralize and thus disrepancies emerge
+   - **Tonal difference**: per-pixel absolute value intensity diff + threshold mask
+
+These visualizations are meant to support close looking and connoisseurship (prompts for interpretation, not automatic “state detection”).
+
+Repo: [GitHub](https://github.com/laurenalexander2/ai_state_detector_full#)
 """
 )
 
