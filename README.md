@@ -102,15 +102,15 @@ Produces **subpixel alignment** when successful.
  
 ### **3. Tonal Difference Map**
 After alignment, the base image and warped target are compared using a per-pixel absolute intensity difference:
-abs(base_gray − aligned_target)
+- abs(base_gray − aligned_target)
 
-Optional normalization for visualization
-Optional global thresholding to produce a binary mask
-This representation emphasizes low-frequency tonal divergence rather than discrete edge changes, making it sensitive to:
-Plate wear and burnishing
-Inking density variation
-Retroussage and wiping patterns
-Broad changes in plate tone
+- Optional normalization for visualization
+- Optional global thresholding to produce a binary mask
+- This representation emphasizes low-frequency tonal divergence rather than discrete edge changes, making it sensitive to:
+- Plate wear and burnishing
+- Inking density variation
+- Retroussage and wiping patterns
+- Broad changes in plate tone
 
 The binary mask is derived via a fixed or user-adjustable threshold and is primarily intended as a region-of-interest extractor rather than a semantic classifier.
 
@@ -118,13 +118,14 @@ The binary mask is derived via a fixed or user-adjustable threshold and is prima
 
 ### ***4. Color Overlay (Channel-Mapped Composite)***
 The color overlay maps each aligned impression into separate color channels:
-Base → Red
-Target → Cyan (Green + Blue)
+- Base → Red
+- Target → Cyan (Green + Blue)
 
-The composite is formed by additive channel blending after normalization.
-No edge detection or thresholding is applied at this stage.
-Interpretive behavior:
-Spatial agreement → neutral gray
-Line displacement, reinforcement, or loss → chromatic separation
-Subtle mismatches remain visible without hard binarization
+- The composite is formed by additive channel blending after normalization.
+- No edge detection or thresholding is applied at this stage.
+- Interpretive behavior:
+- Spatial agreement → neutral gray
+- Line displacement, reinforcement, or loss → chromatic separation
+- Subtle mismatches remain visible without hard binarization
+
 This mode preserves continuous spatial information and is therefore preferred for close visual inspection of line structure and cross-hatching.
