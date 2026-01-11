@@ -5,9 +5,9 @@
 
 ## **Overview**
 
-The **Intaglio State Comparator** is a computer-vision research tool designed for **connoisseurship**, **technical art history**, and **print-room analysis**.
+The **Print Comparator** is a computer-vision research tool designed for **technical art history** and **print-room analysis**.
 
-Given two digitized impressions of the *same intaglio plate* (etching, engraving, drypoint, mezzotint, etc.), the tool:
+Given two digitized impressions of the *same plate*, the tool:
 
 - Standardizes both images  
 - Aligns the second impression to the first  
