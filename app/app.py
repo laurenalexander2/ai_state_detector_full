@@ -10,7 +10,7 @@ import streamlit as st
 from PIL import Image
 
 # Optional: enables auto-animated swipe via timed reruns.
-# If missing, alignment swipe falls back to a manual slider.
+# IMPORTANT: we only call autorefresh when the swipe mode is active, otherwise it can look like an infinite loader.
 try:
     from streamlit_autorefresh import st_autorefresh
 except Exception:
@@ -43,7 +43,7 @@ Compare two impressions of the same intaglio plate.
 
 - Examples-first
 - Alignment swipe is a visual analysis mode
-- Alignment swipe can run automatically (autoplay) if `streamlit-autorefresh` is installed
+- Alignment swipe can autoplay if `streamlit-autorefresh` is installed
 """
 )
 
@@ -135,6 +135,9 @@ def wipe_base_to_target(base_img: np.ndarray, target_img: np.ndarray, pct: int) 
       pct=100 => 100% target
     Works for grayscale or RGB (shapes must match).
     """
+    if base_img.shape[:2] != target_img.shape[:2]:
+        raise ValueError(f"Wipe requires same shape. base={base_img.shape} target={target_img.shape}")
+
     h, w = base_img.shape[:2]
     x = int(w * pct / 100.0)
     out = base_img.copy()
@@ -189,6 +192,14 @@ if "aligned_target" not in st.session_state:
 if "H" not in st.session_state:
     st.session_state.H = None
 
+# swipe state (prevents "always loading" and lets us stop/restart cleanly)
+if "swipe_playing" not in st.session_state:
+    st.session_state.swipe_playing = False
+if "swipe_t0" not in st.session_state:
+    st.session_state.swipe_t0 = 0.0
+if "swipe_token" not in st.session_state:
+    st.session_state.swipe_token = None
+
 
 # -------------------------------------------------
 # Inputs (examples-first)
@@ -222,6 +233,7 @@ with tab_ex:
             st.session_state.base_bytes = read_bytes(str(base_p))
             st.session_state.target_bytes = read_bytes(str(targ_p))
             st.session_state.derived_token = None  # invalidate derived results
+            st.session_state.swipe_playing = False  # stop swipe when switching input
 
 with tab_up:
     u1 = st.file_uploader("Base image", type=UPLOAD_TYPES, key="upload_base")
@@ -230,7 +242,8 @@ with tab_up:
     if u1 and u2:
         st.session_state.base_bytes = u1.getvalue()
         st.session_state.target_bytes = u2.getvalue()
-        st.session_state.derived_token = None  # invalidate derived results
+        st.session_state.derived_token = None
+        st.session_state.swipe_playing = False
 
 if not st.session_state.base_bytes or not st.session_state.target_bytes:
     st.info("Choose an example (recommended) or upload two images to begin.")
@@ -252,7 +265,7 @@ with st.container(border=True):
 
 
 # -------------------------------------------------
-# Processing settings (no pipeline buttons)
+# Processing settings
 # -------------------------------------------------
 st.markdown("---")
 st.subheader("Processing settings")
@@ -286,6 +299,9 @@ if st.session_state.derived_token != token:
     st.session_state.H = H
     st.session_state.derived_token = token
 
+    # Any processing change stops autoplay to prevent the "always loading" feel
+    st.session_state.swipe_playing = False
+
 base_gray = st.session_state.base_gray
 target_gray = st.session_state.target_gray
 aligned_target = st.session_state.aligned_target
@@ -305,7 +321,6 @@ mode = st.radio(
 
 invert = st.checkbox("Invert black/white", value=False)
 
-# holds current view for the download triptych
 composite_rgb = None
 
 if mode == "Color overlay (red vs cyan)":
@@ -345,23 +360,50 @@ elif mode == "Tonal difference":
         st.image(overlay, caption="Overlay", use_container_width=True, clamp=True)
 
 else:
-    # "Automation": the swipe advances automatically on a timer.
-    # If autorefresh is unavailable, fall back to a manual slider.
-    WIPE_PERIOD_SEC = 10.0  # one full sweep duration
-    if st_autorefresh is None:
-        st.caption("Autoplay requires `streamlit-autorefresh`. Falling back to manual swipe.")
-        wipe_pct = st.slider("Swipe (base → aligned target)", 0, 100, 50, 1)
-    else:
-        # refresh ~10 fps; adjust if CPU is high
-        st_autorefresh(interval=100, key="swipe_autoplay_refresh")
-        phase = (time.time() % WIPE_PERIOD_SEC) / WIPE_PERIOD_SEC
+    # Fix: prevent "infinite loading" by ONLY autorefreshing while 'playing' is true,
+    # and by keeping the swipe phase derived from (time.time() - swipe_t0), not raw time.time().
+    # Also: render the swipe in a narrower center column so it's closer in feel to the other panels.
+    WIPE_PERIOD_SEC = 10.0
+
+    # If we entered swipe mode, keep a stable token so toggling modes doesn't desync.
+    if st.session_state.swipe_token != token:
+        st.session_state.swipe_token = token
+        st.session_state.swipe_playing = False
+
+    # Controls (minimal)
+    autoplay_available = st_autorefresh is not None
+    autoplay = st.checkbox("Autoplay", value=False, disabled=not autoplay_available)
+
+    if autoplay and autoplay_available and not st.session_state.swipe_playing:
+        st.session_state.swipe_playing = True
+        st.session_state.swipe_t0 = time.time()
+
+    if (not autoplay) and st.session_state.swipe_playing:
+        st.session_state.swipe_playing = False
+
+    if st.session_state.swipe_playing and autoplay_available:
+        # Only rerun while actually playing (avoids global infinite spinner vibes)
+        st_autorefresh(interval=120, key="swipe_refresh")  # ~8 fps (lighter on host)
+
+        t = time.time() - st.session_state.swipe_t0
+        phase = (t % WIPE_PERIOD_SEC) / WIPE_PERIOD_SEC
         wipe_pct = int(phase * 100)
+    else:
+        wipe_pct = st.slider("Swipe (base → aligned target)", 0, 100, 50, 1)
 
-    swipe = wipe_base_to_target(base_gray, aligned_target, wipe_pct)
+    try:
+        swipe = wipe_base_to_target(base_gray, aligned_target, wipe_pct)
+    except Exception as e:
+        st.error(f"Swipe failed: {e}")
+        st.stop()
+
     st.caption("Swipe viewer uses preprocessed images (grayscale).")
-    st.image(swipe, use_container_width=True, clamp=True)
 
-    # For download: convert to RGB for consistent stacking
+    # Smaller, centered rendering (matches the scale of the other panels better)
+    a1, a2, a3 = st.columns([1.4, 2.0, 1.4])
+    with a2:
+        st.image(swipe, use_container_width=True, clamp=True)
+
     composite_rgb = cv2.cvtColor(swipe, cv2.COLOR_GRAY2RGB)
 
 
