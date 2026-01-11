@@ -40,7 +40,7 @@ Workflow:
    - **Color overlay (red vs cyan)**: impressions mapped to color channels; overlaps neutralize and thus disrepancies emerge
    - **Tonal difference**: per-pixel absolute value intensity diff + threshold mask
 
-These visualizations are meant to support close looking and connoisseurship (prompts for interpretation, not automatic “state detection”).
+For best view - trust me - try downloading!
 
 Repo: [GitHub](https://github.com/laurenalexander2/ai_state_detector_full#)
 """
