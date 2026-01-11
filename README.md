@@ -99,7 +99,7 @@ Because impressions differ slightly due to scanner skew, paper distortion, or ph
 Produces **subpixel alignment** when successful.
 
 ---
-
+ 
 ### **3. Tonal Difference Map**
 After alignment, the base image and warped target are compared using a per-pixel absolute intensity difference:
 abs(base_gray − aligned_target)
