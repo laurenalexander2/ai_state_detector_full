@@ -1,6 +1,7 @@
 # **Print Comparator**  
 ### *A Computer Vision Tool for Comparative Analysis of Print Impressions*
 **Try it out:** https://matrixvision.streamlit.app/
+**Download and run locally:** streamlit run app/app.py
 ---
 
 ## **Overview**
