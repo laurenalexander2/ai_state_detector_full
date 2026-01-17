@@ -21,7 +21,6 @@ from align import align_images
 from diffmaps import create_overlay
 from utils import bgr_to_rgb
 
-
 # -------------------------------------------------
 # Page config
 # -------------------------------------------------
@@ -44,7 +43,6 @@ Repo: [GitHub](https://github.com/laurenalexander2/ai_state_detector_full#)
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 UPLOAD_TYPES = ["jpg", "jpeg", "png", "tif", "tiff"]
 EXAMPLES_DIR = ROOT / "app" / "examples"
-
 
 # -------------------------------------------------
 # Helpers
@@ -148,6 +146,7 @@ def make_download_sheet(
       Row 2: (optional) tonal_diff | mask | tonal_overlay
     Images are assumed RGB uint8 (mask/tonal_diff should be RGB already).
     """
+
     def resize_to_h(img: np.ndarray, h: int) -> np.ndarray:
         if img.shape[0] == h:
             return img
@@ -163,7 +162,9 @@ def make_download_sheet(
         if im.shape[1] == w:
             return im
         pad = w - im.shape[1]
-        return cv2.copyMakeBorder(im, 0, 0, 0, pad, borderType=cv2.BORDER_CONSTANT, value=(255, 255, 255))
+        return cv2.copyMakeBorder(
+            im, 0, 0, 0, pad, borderType=cv2.BORDER_CONSTANT, value=(255, 255, 255)
+        )
 
     row1 = [base_img, target_img] + ([overlay_img] if overlay_img is not None else [])
     row1_img = hstack(row1)
@@ -179,7 +180,7 @@ def make_download_sheet(
 
 
 # -------------------------------------------------
-# Session state defaults (no NameError try/except)
+# Session state defaults
 # -------------------------------------------------
 st.session_state.setdefault("base_bytes", None)
 st.session_state.setdefault("target_bytes", None)
@@ -197,9 +198,9 @@ st.session_state.setdefault("upload_nonce", 0)
 # Settings state
 st.session_state.setdefault("hide_overlay", False)
 st.session_state.setdefault("invert_overlay", False)  # overlay-only
-st.session_state.setdefault("swap_colors", False)     # overlay-only
+st.session_state.setdefault("swap_colors", False)  # overlay-only
 st.session_state.setdefault("hide_tonal", False)
-st.session_state.setdefault("mask_sensitivity", 30)   # 1..100 (tonal-only)
+st.session_state.setdefault("mask_sensitivity", 30)  # 1..100 (tonal-only)
 st.session_state.setdefault("max_width", 3000)
 
 
@@ -214,48 +215,89 @@ def reset_loaded_pair() -> None:
 
 def clear_all() -> None:
     reset_loaded_pair()
-    # Reset uploaders by changing their keys
-    st.session_state.upload_nonce += 1
+    st.session_state.upload_nonce += 1  # reset uploaders by changing their keys
+
+
+def load_next_sample(samples: list[tuple[str, Path, Path]]) -> None:
+    if not samples:
+        return
+    name, base_p, targ_p = samples[st.session_state.sample_index]
+    st.session_state.sample_index = (st.session_state.sample_index + 1) % len(samples)
+    st.session_state.sample_loaded_once = True
+    st.session_state.base_bytes = read_bytes(str(base_p))
+    st.session_state.target_bytes = read_bytes(str(targ_p))
+    st.session_state.derived_token = None
+
+
+def render_actions_row(
+    samples: list[tuple[str, Path, Path]],
+    loaded: bool,
+    show_download: bool,
+    download_data: bytes | None,
+    pos: str,
+) -> None:
+    """
+    Renders: Try sample | Clear | Download view (PNG)
+    - pos must be unique per row ("top" or "bottom") to keep widget keys stable.
+    - show_download controls whether the download button appears (only after processing).
+    """
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        sample_label = "Try a sample" if not st.session_state.sample_loaded_once else "Try a new sample"
+        if st.button(
+            sample_label,
+            type="primary",
+            use_container_width=True,
+            disabled=(len(samples) == 0),
+            key=f"btn_sample_{pos}",
+        ):
+            load_next_sample(samples)
+            st.rerun()
+
+    with c2:
+        if st.button(
+            "Clear",
+            use_container_width=True,
+            disabled=not loaded,
+            key=f"btn_clear_{pos}",
+        ):
+            clear_all()
+            st.rerun()
+
+    with c3:
+        if show_download and download_data is not None:
+            st.download_button(
+                "Download view (PNG)",
+                data=download_data,
+                file_name="intaglio_state_comparison.png",
+                mime="image/png",
+                use_container_width=True,
+                key=f"dl_{pos}",
+            )
+        else:
+            st.caption("Download enabled after processing.")
 
 
 # -------------------------------------------------
-# Inputs (single section)
+# Inputs
 # -------------------------------------------------
 st.subheader("Inputs")
 
 samples = find_example_pairs(EXAMPLES_DIR)
 loaded = bool(st.session_state.base_bytes and st.session_state.target_bytes)
 
-# Top actions row: Try sample (primary), Clear, Download (enabled when ready)
-act1, act2, act3 = st.columns(3)
-
-with act1:
-    sample_label = "Try a sample" if not st.session_state.sample_loaded_once else "Try a new sample"
-    if st.button(
-        sample_label,
-        type="primary",  # steer users here
-        use_container_width=True,
-        disabled=(len(samples) == 0),
-    ):
-        name, base_p, targ_p = samples[st.session_state.sample_index]
-        st.session_state.sample_index = (st.session_state.sample_index + 1) % len(samples)
-        st.session_state.sample_loaded_once = True
-
-        st.session_state.base_bytes = read_bytes(str(base_p))
-        st.session_state.target_bytes = read_bytes(str(targ_p))
-        st.session_state.derived_token = None
-        st.rerun()
-
-with act2:
-    if st.button("Clear", use_container_width=True, disabled=not loaded):
-        clear_all()
-        st.rerun()
+# Top actions row (download not available yet)
+render_actions_row(
+    samples=samples,
+    loaded=loaded,
+    show_download=False,
+    download_data=None,
+    pos="top",
+)
 
 # Uploaders (only show when nothing loaded)
 if not loaded:
-    with act3:
-        st.caption("Download enabled after processing.")
-
     nonce = st.session_state.upload_nonce
     u1 = st.file_uploader("Base image", type=UPLOAD_TYPES, key=f"upload_base_{nonce}")
     u2 = st.file_uploader("Target image", type=UPLOAD_TYPES, key=f"upload_target_{nonce}")
@@ -276,7 +318,9 @@ if not loaded:
         st.info("Upload two images to begin, or click “Try a sample”.")
     st.stop()
 
+# -------------------------------------------------
 # Decode originals
+# -------------------------------------------------
 base_bgr = decode_bgr(st.session_state.base_bytes)
 target_bgr = decode_bgr(st.session_state.target_bytes)
 base_rgb_full = cv2.cvtColor(base_bgr, cv2.COLOR_BGR2RGB)
@@ -292,8 +336,8 @@ with st.expander("Settings", expanded=False):
     with col_overlay:
         st.markdown("**Color overlay**")
         st.checkbox("Hide color overlay", key="hide_overlay")
-        st.checkbox("Invert overlay black/white", key="invert_overlay")  # overlay-only
-        st.checkbox("Swap overlay colors (red ↔ cyan)", key="swap_colors")  # overlay-only
+        st.checkbox("Invert overlay black/white", key="invert_overlay")
+        st.checkbox("Swap overlay colors (red ↔ cyan)", key="swap_colors")
 
     with col_tonal:
         st.markdown("**Tonal difference**")
@@ -303,8 +347,8 @@ with st.expander("Settings", expanded=False):
             min_value=1,
             max_value=100,
             value=30,
-            key="mask_sensitivity"
-        )  # tonal-only
+            key="mask_sensitivity",
+        )
 
     with col_meta:
         st.markdown("**Processing**")
@@ -313,7 +357,7 @@ with st.expander("Settings", expanded=False):
             min_value=3000,
             max_value=10000,
             step=200,
-            value=5000,
+            value=2000,
             key="max_width",
         )
 
@@ -345,7 +389,7 @@ if st.session_state.derived_token != token:
 base_gray = st.session_state.base_gray
 aligned_target = st.session_state.aligned_target
 
-# Match display originals to processed resolution (prevents upscaling overlay/diagnostics)
+# Match display originals to processed resolution
 h, w = base_gray.shape[:2]
 base_rgb = cv2.resize(base_rgb_full, (w, h), interpolation=cv2.INTER_AREA)
 target_rgb = cv2.resize(target_rgb_full, (w, h), interpolation=cv2.INTER_AREA)
@@ -366,13 +410,13 @@ tonal_diff_rgb = cv2.cvtColor(tonal_diff, cv2.COLOR_GRAY2RGB)
 mask_rgb = cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB)
 
 # -------------------------------------------------
-# Display: 2 rows x 3 images (no stitched "box" composites)
+# Display: 2 rows x 3 images
 # -------------------------------------------------
 st.markdown("---")
 with st.container(border=True):
     st.markdown("**Loaded pair + analysis**")
 
-    # Row 1: Base | Target | Color overlay (or empty)
+    # Row 1
     if hide_overlay:
         c1, c2 = st.columns(2)
         with c1:
@@ -388,7 +432,7 @@ with st.container(border=True):
         with c3:
             st.image(color_overlay, caption="Color overlay", use_container_width=True, clamp=True)
 
-    # Row 2: Tonal diff | Mask | Tonal overlay (optional)
+    # Row 2
     if not hide_tonal:
         d1, d2, d3 = st.columns(3)
         with d1:
@@ -399,7 +443,7 @@ with st.container(border=True):
             st.image(tonal_overlay, caption="Tonal overlay", use_container_width=True, clamp=True)
 
 # -------------------------------------------------
-# Export + Download (in the top action row, third column)
+# Export + Download data
 # -------------------------------------------------
 overlay_for_export = None if hide_overlay else color_overlay
 tonal_for_export = None if hide_tonal else tonal_diff_rgb
@@ -417,12 +461,16 @@ export_sheet = make_download_sheet(
 
 buf = BytesIO()
 Image.fromarray(export_sheet).save(buf, format="PNG")
+download_bytes = buf.getvalue()
 
-with act3:
-    st.download_button(
-        "Download view (PNG)",
-        data=buf.getvalue(),
-        file_name="intaglio_state_comparison.png",
-        mime="image/png",
-        use_container_width=True,
-    )
+# -------------------------------------------------
+# Bottom actions row (now includes download)
+# -------------------------------------------------
+st.markdown("")
+render_actions_row(
+    samples=samples,
+    loaded=True,
+    show_download=True,
+    download_data=download_bytes,
+    pos="bottom",
+)
